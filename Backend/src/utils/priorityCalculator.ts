@@ -1,4 +1,21 @@
-export type HazardCategory = "pothole" | "damaged_pavement" | "faded_markings" | "roadside_obstruction" | "drainage_issue" | "poor_lighting" | "driver_behavior" | "other";
+export type HazardCategory =
+  | "pothole"
+  | "road_cracks"
+  | "damaged_pavement"
+  | "edge_damage"
+  | "patch_deterioration"
+  | "loose_aggregate"
+  | "debris_on_road"
+  | "vegetation"
+  | "drainage_iron_grid"
+  | "broken_curb"
+  | "faded_markings"
+  | "roadside_obstruction"
+  | "drainage_issue"
+  | "poor_lighting"
+  | "driver_behavior"
+  | "other";
+
 export type Severity = "low" | "medium" | "high" | "critical";
 
 /**
@@ -19,14 +36,27 @@ export function calculatePriorityScore(severity: Severity, category: HazardCateg
     switch (category) {
         case "pothole":
         case "drainage_issue":
+        case "drainage_iron_grid":
+        case "broken_curb":
             score += 15; break;
         case "damaged_pavement":
+        case "road_cracks":
+        case "edge_damage":
         case "poor_lighting":
             score += 12; break;
-        case "roadside_obstruction": score += 10; break;
-        case "faded_markings": score += 8; break;
-        case "driver_behavior": score += 5; break;
-        case "other": score += 3; break;
+        case "debris_on_road":
+        case "roadside_obstruction":
+        case "patch_deterioration":
+        case "loose_aggregate":
+            score += 10; break;
+        case "vegetation":
+        case "faded_markings":
+            score += 8; break;
+        case "driver_behavior":
+            score += 5; break;
+        case "other":
+        default:
+            score += 3; break;
     }
 
     // Age weight (capped at 30 days = 30 points)
