@@ -4,6 +4,22 @@ export type HazardCategory = 'pothole' | 'damaged_pavement' | 'faded_markings' |
 export type Severity = 'low' | 'medium' | 'high' | 'critical';
 export type Status = 'submitted' | 'under_review' | 'in_progress' | 'resolved';
 
+export interface IMLPrediction {
+  label: string;
+  rawClass: string;
+  confidence: number;
+  confidencePercentage: string;
+  mappedCategory?: string;
+  suggestedSeverity?: string;
+  topPredictions?: Array<{
+    rawClass: string;
+    label: string;
+    confidence: number;
+    confidencePercentage: string;
+  }>;
+  isLowConfidence?: boolean;
+}
+
 export interface IHazardReport extends Document {
   title: string;
   description: string;
@@ -16,6 +32,7 @@ export interface IHazardReport extends Document {
   reportedAt: Date;
   updatedAt: Date;
   priorityScore: number;
+  mlPrediction?: IMLPrediction;
 }
 
 const hazardReportSchema = new Schema<IHazardReport>(
@@ -77,6 +94,10 @@ const hazardReportSchema = new Schema<IHazardReport>(
     priorityScore: {
       type: Number,
       default: 0,
+    },
+    mlPrediction: {
+      type: Schema.Types.Mixed,
+      default: null,
     },
   },
   {

@@ -5,7 +5,8 @@ import {
     getReport, 
     createReport, 
     updateReport, 
-    deleteReport 
+    deleteReport,
+    classifyImage
 } from '../controllers/report.controller';
 import { protect, authorize, optionalAuth } from '../middleware/auth';
 import { reportValidation, validate } from '../middleware/validate';
@@ -15,6 +16,7 @@ const router = Router();
 // Public routes
 router.get('/', getReports);
 router.get('/nearby', getNearbyReports);
+router.post('/classify', classifyImage);
 router.get('/:id', getReport);
 
 // Report submission and updates

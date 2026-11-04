@@ -17,18 +17,26 @@ connectDB();
 const app: Express = express();
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+app.options('*', cors());
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ limit: '25mb', extended: true }));
 app.use(morgan('dev'));
 
-// Serve static files from 'uploads' directory
+// Serve static files from 'uploads' and 'public' directories
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+app.use('/gis', express.static(path.join(__dirname, '../public/gis')));
+app.use('/public', express.static(path.join(__dirname, '../public')));
 
 import authRoutes from './routes/auth.routes';
 import reportRoutes from './routes/report.routes';
 import dashboardRoutes from './routes/dashboard.routes';
 import uploadRoutes from './routes/upload.routes';
+import gisRoutes from './routes/gis.routes';
 
 // API Welcome & Healthcheck Explorer
 app.get(['/', '/api'], (req: Request, res: Response) => {
@@ -64,6 +72,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/upload', uploadRoutes);
+app.use('/api/gis', gisRoutes);
 
 // Error Handler Middleware
 const errorHandler = (err: any, req: Request, res: Response, next: NextFunction) => {

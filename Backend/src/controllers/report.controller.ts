@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import HazardReport from '../models/HazardReport';
 import { calculatePriorityScore, Severity, HazardCategory } from '../utils/priorityCalculator';
 import { memoryStore } from '../utils/memoryStore';
+import { predictRoadHazard } from '../utils/mlPredictor';
 
 /**
  * Get all reports with optional filtering, search, and pagination
@@ -71,20 +72,33 @@ export const createReport = async (req: Request, res: Response) => {
     try {
         const { title, description, category, severity, location, images } = req.body;
         
+        // ML Prediction: Use client-provided prediction or compute automatically from trained model
+        let mlPrediction: any = req.body.mlPrediction || null;
+        if (!mlPrediction && images && Array.isArray(images) && images.length > 0 && images[0]) {
+            try {
+                mlPrediction = await predictRoadHazard(images[0]);
+            } catch (mlErr) {
+                console.warn('[ML Integration] Automatic inference warning:', mlErr);
+            }
+        }
+
         const reportedAt = new Date();
-        const priorityScore = calculatePriorityScore(severity as Severity, category as HazardCategory, reportedAt);
+        const finalCategory = category || mlPrediction?.mappedCategory || 'other';
+        const finalSeverity = severity || mlPrediction?.suggestedSeverity || 'medium';
+        const priorityScore = calculatePriorityScore(finalSeverity as Severity, finalCategory as HazardCategory, reportedAt);
         const reportedBy = (req as any).user ? (req as any).user : { name: 'Anonymous Campus Reporter' };
         
         // 1. Immediately save into memory store
         const saved = memoryStore.addReport({
             title,
             description,
-            category,
-            severity,
+            category: finalCategory,
+            severity: finalSeverity,
             location,
             images: images || [],
             reportedBy,
-            priorityScore
+            priorityScore,
+            mlPrediction: mlPrediction || undefined
         });
 
         // 2. Also persist to MongoDB asynchronously if online
@@ -92,20 +106,42 @@ export const createReport = async (req: Request, res: Response) => {
             HazardReport.create({
                 title,
                 description,
-                category,
-                severity,
+                category: finalCategory,
+                severity: finalSeverity,
                 location,
                 images: images || [],
                 reportedBy: (req as any).user?.id || null,
                 reportedAt,
                 priorityScore,
-                status: 'submitted'
+                status: 'submitted',
+                mlPrediction: mlPrediction || undefined
             }).catch(() => {});
         }
         
-        return res.status(201).json({ success: true, data: saved });
+        return res.status(201).json({ 
+            success: true, 
+            data: saved, 
+            mlPrediction: mlPrediction || undefined 
+        });
     } catch (error: any) {
         return res.status(500).json({ success: false, message: 'Server error', error: error.message });
+    }
+};
+
+/**
+ * Direct ML Classification endpoint for previewing predictions on uploaded photos
+ */
+export const classifyImage = async (req: Request, res: Response) => {
+    try {
+        const { image, image_base64 } = req.body;
+        const target = image || image_base64;
+        if (!target) {
+            return res.status(400).json({ success: false, message: 'No image provided for classification.' });
+        }
+        const prediction = await predictRoadHazard(target);
+        return res.status(200).json({ success: true, data: prediction });
+    } catch (error: any) {
+        return res.status(500).json({ success: false, message: 'Classification failed', error: error.message });
     }
 };
 
@@ -114,11 +150,11 @@ export const createReport = async (req: Request, res: Response) => {
  */
 export const updateReport = async (req: Request, res: Response) => {
     try {
-        const { category, severity, status, title, description, location, images } = req.body;
+        const { category, severity, status, title, description, location, images, mlPrediction } = req.body;
         const targetId = req.params.id;
 
         const updatedMem = memoryStore.updateReport(targetId, {
-            category, severity, status, title, description, location, images
+            category, severity, status, title, description, location, images, mlPrediction
         });
 
         if (mongoose.connection.readyState === 1) {
@@ -132,6 +168,7 @@ export const updateReport = async (req: Request, res: Response) => {
                     if (status) report.status = status;
                     if (category) report.category = category;
                     if (severity) report.severity = severity;
+                    if (mlPrediction) (report as any).mlPrediction = mlPrediction;
                     report.updatedAt = new Date();
                     await report.save();
                 }

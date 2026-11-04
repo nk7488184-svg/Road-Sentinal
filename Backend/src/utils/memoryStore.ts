@@ -11,6 +11,7 @@ export interface MockReport {
   reportedAt: string;
   updatedAt: string;
   priorityScore: number;
+  mlPrediction?: any;
 }
 
 export const initialReports: MockReport[] = [
@@ -86,13 +87,12 @@ export const initialReports: MockReport[] = [
   }
 ];
 
-// Helper to sanitize images so huge base64 strings don't bloat JSON payloads
+// Helper to sanitize images - allows compressed base64 images up to 4MB for display
 function sanitizeImages(images: any[]): string[] {
   if (!Array.isArray(images)) return [];
   return images.map(img => {
     if (typeof img !== 'string') return '';
-    if (img.startsWith('data:image') && img.length > 50000) {
-      // Return a lightweight placeholder / trimmed indicator for lists
+    if (img.startsWith('data:image') && img.length > 4000000) {
       return 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100"><rect fill="%2322c55e" width="100" height="100"/><text fill="%23ffffff" x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" font-size="12">Uploaded Photo</text></svg>';
     }
     return img;
@@ -105,7 +105,6 @@ class MemoryStore {
   getReports(query: any = {}) {
     let result = this.reports.map(r => ({
       ...r,
-      // Strip oversized base64 for list endpoints so response is always lightning fast
       images: sanitizeImages(r.images)
     }));
     if (query.category) result = result.filter(r => r.category === query.category);
@@ -113,7 +112,7 @@ class MemoryStore {
     if (query.status) result = result.filter(r => r.status === query.status);
     if (query.search) {
       const s = String(query.search).toLowerCase();
-      result = result.filter(r => r.title.toLowerCase().includes(s) || r.location.address.toLowerCase().includes(s));
+      result = result.filter(r => (r.title && r.title.toLowerCase().includes(s)) || (r.location?.address && r.location.address.toLowerCase().includes(s)));
     }
     return result;
   }
@@ -142,6 +141,7 @@ class MemoryStore {
       reportedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       priorityScore: reportData.priorityScore || 50,
+      mlPrediction: reportData.mlPrediction || null,
     };
     this.reports.unshift(newReport);
     return newReport;
@@ -150,10 +150,19 @@ class MemoryStore {
   updateReport(id: string, updates: any) {
     const idx = this.reports.findIndex(r => r.id === id || (r as any)._id === id);
     if (idx === -1) return null;
+
+    // Filter out undefined keys so we never overwrite existing fields with undefined!
+    const cleanUpdates: any = {};
+    for (const key of Object.keys(updates)) {
+      if (updates[key] !== undefined) {
+        cleanUpdates[key] = updates[key];
+      }
+    }
+
     this.reports[idx] = { 
       ...this.reports[idx], 
-      ...updates, 
-      images: updates.images ? sanitizeImages(updates.images) : this.reports[idx].images,
+      ...cleanUpdates, 
+      images: cleanUpdates.images ? sanitizeImages(cleanUpdates.images) : this.reports[idx].images,
       updatedAt: new Date().toISOString() 
     };
     return this.reports[idx];
@@ -169,4 +178,3 @@ class MemoryStore {
 }
 
 export const memoryStore = new MemoryStore();
-
