@@ -209,9 +209,12 @@ class RoadHazardClassifier:
         b = arr[:, :, 2]
         gray = 0.299 * r + 0.587 * g + 0.114 * b
 
-        # 1. Genuine green vegetation pixel mask (excludes grey asphalt)
-        is_green = (g > 1.35 * r) & (g > 1.25 * b) & (g > 55.0)
+        # 1. Genuine vegetation / moss index using Normalized Excess Green (NExG)
+        total_rgb = r + g + b + 1.0
+        nexg = (2.0 * g - r - b) / total_rgb
+        is_green = (g > r) & (g > b) & ((g - r) >= 6.0) & (nexg > 0.05)
         green_ratio = float(np.mean(is_green))
+        avg_nexg = float(np.mean(nexg))
 
         # 2. Edge density / gradients
         dx = np.abs(gray[:, 1:] - gray[:, :-1])
@@ -240,9 +243,9 @@ class RoadHazardClassifier:
         for cls_name in self.classes:
             scores[cls_name] = 0.05
 
-        # STRICT vegetation check: only applies when authentic green plant pixels cover > 20% of surface
-        if green_ratio > 0.20:
-            scores["Vegetation_Moss"] += 4.5 * (green_ratio / 0.5)
+        # Authentic roadside moss/vegetation detected (> 8% of frame or positive mean NExG)
+        if green_ratio > 0.08 or avg_nexg > 0.05:
+            scores["Vegetation_Moss"] += 4.5 + (green_ratio * 10.0) + max(0.0, avg_nexg * 10.0)
 
         if depression_delta > 10.0 or (dark_pixels_ratio > 0.15 and depression_delta > 5.0):
             scores["Pothole_Surface_Breakout"] += 3.8 + min(2.5, depression_delta * 0.1)
