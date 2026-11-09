@@ -208,75 +208,127 @@ class RoadHazardClassifier:
         g = arr[:, :, 1]
         b = arr[:, :, 2]
         gray = 0.299 * r + 0.587 * g + 0.114 * b
+        h, w = gray.shape
 
-        # 1. Genuine vegetation / moss index using Normalized Excess Green (NExG)
+        # 1. Genuine Color Metrics (Chlorophyll vs Non-green Chromaticity)
+        mean_r, mean_g, mean_b = float(np.mean(r)), float(np.mean(g)), float(np.mean(b))
+        chroma = float(np.mean(np.abs(r - g) + np.abs(g - b) + np.abs(r - b)) / 2.0)
         total_rgb = r + g + b + 1.0
         nexg = (2.0 * g - r - b) / total_rgb
-        is_green = (g > r) & (g > b) & ((g - r) >= 6.0) & (nexg > 0.05)
+        is_green = (g > r + 8.0) & (g > b + 8.0) & (nexg > 0.08)
         green_ratio = float(np.mean(is_green))
-        avg_nexg = float(np.mean(nexg))
+        green_excess = max(0.0, mean_g - max(mean_r, mean_b))
 
-        # 2. Edge density / gradients
+        # 2. Crater / Depression (Pothole core depression vs rim perimeter)
+        cy, cx = h // 2, w // 2
+        rh, rw = max(2, h // 4), max(2, w // 4)
+        center_patch = gray[cy - rh : cy + rh, cx - rw : cx + rw]
+        rim_patch = np.concatenate([
+            gray[:max(2, h // 8), :].ravel(),
+            gray[-max(2, h // 8):, :].ravel(),
+            gray[:, :max(2, w // 8)].ravel(),
+            gray[:, -max(2, w // 8):].ravel()
+        ])
+        crater_delta = max(0.0, float(np.mean(rim_patch) - np.mean(center_patch)))
+        center_dark = float(np.mean(center_patch < 65.0))
+
+        top_dark = float(np.mean(gray[:3, :] < 50.0))
+        bot_dark = float(np.mean(gray[-3:, :] < 50.0))
+        left_dark = float(np.mean(gray[:, :3] < 50.0))
+        right_dark = float(np.mean(gray[:, -3:] < 50.0))
+        rim_network_cross = (top_dark > 0.005 or bot_dark > 0.005) and (left_dark > 0.005 or right_dark > 0.005)
+
+        # 3. Gradients and Directional Line Bias (Cracks)
         dx = np.abs(gray[:, 1:] - gray[:, :-1])
         dy = np.abs(gray[1:, :] - gray[:-1, :])
-        mean_edge = (np.mean(dx) + np.mean(dy)) / 2.0
-        edge_variance = np.var(dx) + np.var(dy)
+        mean_dx = float(np.mean(dx))
+        mean_dy = float(np.mean(dy))
+        mean_edge = (mean_dx + mean_dy) / 2.0
+        edge_variance = float(np.var(dx) + np.var(dy))
+        directional_bias = max(mean_dx, mean_dy) / (min(mean_dx, mean_dy) + 0.05)
 
-        # 3. Center crater depression (dark core in middle vs perimeter for potholes)
-        h, w = gray.shape
-        cy, cx = h // 2, w // 2
-        center_patch = gray[cy - 25: cy + 25, cx - 25: cx + 25]
-        rim_patch = np.concatenate([gray[:20, :].ravel(), gray[-20:, :].ravel(), gray[:, :20].ravel(), gray[:, -20:].ravel()])
-        depression_delta = np.mean(rim_patch) - np.mean(center_patch)
-        dark_pixels_ratio = np.mean(gray < 65)
+        # 4. Asymmetry (Road Edge / Shoulder / Steps)
+        left_mean = float(np.mean(gray[:, :w // 2]))
+        right_mean = float(np.mean(gray[:, w // 2:]))
+        top_mean = float(np.mean(gray[:h // 2, :]))
+        bottom_mean = float(np.mean(gray[h // 2:, :]))
+        asymmetry_lr = abs(left_mean - right_mean)
+        asymmetry_tb = abs(top_mean - bottom_mean)
+        max_asymmetry = max(asymmetry_lr, asymmetry_tb)
 
-        # 4. Color variance (for debris / scattered objects)
-        color_std = np.std(r) + np.std(g) + np.std(b)
+        # 5. Texture & Roughness
+        local_std = float(np.std(gray))
+        overall_mean = float(np.mean(gray))
 
-        # 5. Left/Right or Top/Bottom asymmetry (edge & shoulder damage)
-        left_half = np.mean(gray[:, :w // 2])
-        right_half = np.mean(gray[:, w // 2:])
-        asymmetry = abs(left_half - right_half)
+        # 6. Periodic Bars / Stripes (Iron Grate / Stairs)
+        vert = np.mean(gray, axis=0)
+        horiz = np.mean(gray, axis=1)
+        amp_v = float(np.max(vert) - np.min(vert))
+        amp_h = float(np.max(horiz) - np.min(horiz))
+        crossings_v = int(np.sum((vert[:-1] > np.mean(vert)) != (vert[1:] > np.mean(vert))))
+        crossings_h = int(np.sum((horiz[:-1] > np.mean(horiz)) != (horiz[1:] > np.mean(horiz))))
 
-        # Score candidates
-        scores = {}
-        for cls_name in self.classes:
-            scores[cls_name] = 0.05
+        scores = {cls_name: 0.0 for cls_name in self.classes}
 
-        # Authentic roadside moss/vegetation detected (> 8% of frame or positive mean NExG)
-        if green_ratio > 0.08 or avg_nexg > 0.05:
-            scores["Vegetation_Moss"] += 4.5 + (green_ratio * 10.0) + max(0.0, avg_nexg * 10.0)
+        # 1. Vegetation / Moss (chlorophyll green dominance)
+        if green_ratio > 0.05 or (green_excess > 5.0 and chroma > 5.0):
+            scores["Vegetation_Moss"] = 5.0 + (green_ratio * 15.0) + (green_excess * 0.3)
 
-        if depression_delta > 10.0 or (dark_pixels_ratio > 0.15 and depression_delta > 5.0):
-            scores["Pothole_Surface_Breakout"] += 3.8 + min(2.5, depression_delta * 0.1)
+        # 2. Iron Grid / Drainage Grate (multiple periodic grating bars)
+        if (crossings_v >= 8 and amp_v > 25.0) or (crossings_h >= 8 and amp_h > 25.0):
+            scores["Iron_grid_damage"] = 5.0 + min(4.0, max(crossings_v, crossings_h) * 0.15) + (mean_edge * 0.1)
 
-        if mean_edge > 12.0 and edge_variance > 100.0:
-            scores["Longitudinal_Crack"] += 3.2
-            scores["Map(Block)_Cracking"] += 3.0
-            scores["Transverse_Crack"] += 2.5
+        # 3. Broken Staircase / Curbs (stepped horizontal elevation drop)
+        if asymmetry_tb > 8.0 and amp_h > 15.0 and crossings_h >= 2 and crossings_v < 6:
+            scores["Broken_Staircase"] = 4.8 + (asymmetry_tb * 0.15) + (mean_dy * 0.2)
 
-        if asymmetry > 20.0:
-            scores["Edge_Shoulder_Damage"] += 3.2
+        # 4. Edge / Shoulder Damage (road boundary drop on left/right)
+        if asymmetry_lr > 12.0 and crossings_v < 4 and crater_delta < 15.0:
+            scores["Edge_Shoulder_Damage"] = 4.8 + (asymmetry_lr * 0.18)
 
-        if color_std > 80.0 and green_ratio < 0.15:
-            scores["Debris_on_road"] += 3.2
-            scores["Raveling_Loose_Aggregate"] += 2.2
+        # 5. Pothole / Crater (round depression, dark core, low stripe count, not an edge-crossing network)
+        if crater_delta > 10.0 and center_dark > 0.15 and directional_bias < 2.0 and not rim_network_cross and crossings_v < 4 and crossings_h < 4:
+            scores["Pothole_Surface_Breakout"] = 5.0 + min(4.0, crater_delta * 0.1) + (center_dark * 4.0)
 
-        if mean_edge > 9.0 and color_std < 55.0 and depression_delta < 8.0:
-            scores["Paver_Damage"] += 2.8
-            scores["Patch_Repair"] += 2.2
+        # 6. Directional Cracks (single prominent cracks or crack network)
+        if crossings_v < 6 and crossings_h < 6:
+            if directional_bias > 2.0 and mean_edge > 0.25:
+                if mean_dx > mean_dy:
+                    scores["Longitudinal_Crack"] = 4.8 + (mean_dx * 0.8)
+                else:
+                    scores["Transverse_Crack"] = 4.8 + (mean_dy * 0.8)
+            elif (rim_network_cross or (mean_edge > 0.8 and edge_variance > 5.0 and directional_bias <= 2.0)) and chroma < 4.0:
+                scores["Map(Block)_Cracking"] = 4.9 + (mean_edge * 0.5)
 
-        # High-contrast horizontal/vertical lines (drainage grid)
-        horizontal_diff = np.mean(np.abs(np.diff(gray, axis=0)))
-        vertical_diff = np.mean(np.abs(np.diff(gray, axis=1)))
-        if abs(horizontal_diff - vertical_diff) > 4.0 and mean_edge > 10.0:
-            scores["Iron_grid_damage"] += 3.0
+        # 7. Debris on Road (genuine non-green chromatic object on road)
+        if chroma > 6.0 and green_excess < 4.0 and crater_delta < 12.0:
+            scores["Debris_on_road"] = 4.8 + min(4.0, chroma * 0.2)
 
-        # Fallback default if image is relatively uniform asphalt
-        if max(scores.values()) <= 0.1:
-            scores["Pothole_Surface_Breakout"] += 1.8
-            scores["Map(Block)_Cracking"] += 1.4
-            scores["Debris_on_road"] += 1.2
+        # 8. Paver Damage (interlocking paver joints, low edge contrast, low color)
+        if 0.2 < mean_edge < 2.0 and directional_bias < 2.0 and chroma < 3.0 and crater_delta < 6.0 and max_asymmetry < 6.0 and local_std < 15.0:
+            scores["Paver_Damage"] = 4.2 + (mean_edge * 0.4)
+
+        # 9. Patch Repair (smooth bounded asphalt patch)
+        if 3.0 < crater_delta < 15.0 and center_dark < 0.10 and local_std < 12.0 and mean_edge < 2.0 and chroma < 3.0:
+            scores["Patch_Repair"] = 4.4 + (crater_delta * 0.1)
+
+        # 10. Loose Aggregate / Rubble (uniform graininess across entire image, low crack peak)
+        if local_std > 12.0 and mean_edge > 2.0 and directional_bias < 1.8 and crater_delta < 8.0 and chroma < 4.0:
+            if overall_mean > 120.0:
+                scores["Rubble_Unpaved_surface"] = 4.5 + (local_std * 0.1)
+            else:
+                scores["Raveling_Loose_Aggregate"] = 4.5 + (local_std * 0.1)
+
+        # Safe fallback if all scores remain near 0
+        if max(scores.values()) < 0.1:
+            if crater_delta > 3.0:
+                scores["Pothole_Surface_Breakout"] = 1.0
+            elif mean_edge > 1.0:
+                scores["Map(Block)_Cracking"] = 1.0
+            elif local_std > 8.0:
+                scores["Raveling_Loose_Aggregate"] = 1.0
+            else:
+                scores["Paver_Damage"] = 1.0
 
         # Convert to Softmax probabilities
         exp_scores = {k: np.exp(v) for k, v in scores.items()}
