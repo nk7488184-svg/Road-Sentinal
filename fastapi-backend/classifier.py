@@ -209,8 +209,9 @@ class RoadHazardClassifier:
         b = arr[:, :, 2]
         gray = 0.299 * r + 0.587 * g + 0.114 * b
 
-        # 1. Vegetation chroma index: (2*G - R - B)
-        green_index = np.mean(2 * g - r - b)
+        # 1. Genuine green vegetation pixel mask (excludes grey asphalt)
+        is_green = (g > 1.35 * r) & (g > 1.25 * b) & (g > 55.0)
+        green_ratio = float(np.mean(is_green))
 
         # 2. Edge density / gradients
         dx = np.abs(gray[:, 1:] - gray[:, :-1])
@@ -239,39 +240,40 @@ class RoadHazardClassifier:
         for cls_name in self.classes:
             scores[cls_name] = 0.05
 
-        if green_index > 18.0:
-            scores["Vegetation_Moss"] += 3.5 + (green_index * 0.1)
+        # STRICT vegetation check: only applies when authentic green plant pixels cover > 20% of surface
+        if green_ratio > 0.20:
+            scores["Vegetation_Moss"] += 4.5 * (green_ratio / 0.5)
 
-        if depression_delta > 14.0 or (dark_pixels_ratio > 0.15 and mean_edge > 9.0):
-            scores["Pothole_Surface_Breakout"] += 3.8 + (depression_delta * 0.1)
+        if depression_delta > 10.0 or (dark_pixels_ratio > 0.15 and depression_delta > 5.0):
+            scores["Pothole_Surface_Breakout"] += 3.8 + min(2.5, depression_delta * 0.1)
 
-        if mean_edge > 13.0 and edge_variance > 120.0:
-            scores["Longitudinal_Crack"] += 2.2
-            scores["Map(Block)_Cracking"] += 2.4
-            scores["Transverse_Crack"] += 1.8
+        if mean_edge > 12.0 and edge_variance > 100.0:
+            scores["Longitudinal_Crack"] += 3.2
+            scores["Map(Block)_Cracking"] += 3.0
+            scores["Transverse_Crack"] += 2.5
 
-        if asymmetry > 22.0:
+        if asymmetry > 20.0:
             scores["Edge_Shoulder_Damage"] += 3.2
 
-        if color_std > 85.0 and dark_pixels_ratio < 0.2:
-            scores["Debris_on_road"] += 3.0
-            scores["Raveling_Loose_Aggregate"] += 2.0
+        if color_std > 80.0 and green_ratio < 0.15:
+            scores["Debris_on_road"] += 3.2
+            scores["Raveling_Loose_Aggregate"] += 2.2
 
-        if mean_edge > 10.0 and color_std < 50.0:
-            scores["Paver_Damage"] += 2.5
-            scores["Patch_Repair"] += 2.0
+        if mean_edge > 9.0 and color_std < 55.0 and depression_delta < 8.0:
+            scores["Paver_Damage"] += 2.8
+            scores["Patch_Repair"] += 2.2
 
         # High-contrast horizontal/vertical lines (drainage grid)
         horizontal_diff = np.mean(np.abs(np.diff(gray, axis=0)))
         vertical_diff = np.mean(np.abs(np.diff(gray, axis=1)))
-        if abs(horizontal_diff - vertical_diff) > 4.0 and mean_edge > 11.0:
-            scores["Iron_grid_damage"] += 2.8
+        if abs(horizontal_diff - vertical_diff) > 4.0 and mean_edge > 10.0:
+            scores["Iron_grid_damage"] += 3.0
 
         # Fallback default if image is relatively uniform asphalt
         if max(scores.values()) <= 0.1:
-            scores["Pothole_Surface_Breakout"] += 1.5
-            scores["Map(Block)_Cracking"] += 1.2
-            scores["Debris_on_road"] += 1.0
+            scores["Pothole_Surface_Breakout"] += 1.8
+            scores["Map(Block)_Cracking"] += 1.4
+            scores["Debris_on_road"] += 1.2
 
         # Convert to Softmax probabilities
         exp_scores = {k: np.exp(v) for k, v in scores.items()}
