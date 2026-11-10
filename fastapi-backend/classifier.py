@@ -1,19 +1,22 @@
+"""Loads best_model.pth (EfficientNetV2-S) and classifies road hazards.
+Directly incorporates RD_API PyTorch architecture with enriched metadata.
+"""
 import os
 import io
-import base64
 import json
+import base64
 import urllib.request
-from PIL import Image
-import numpy as np
+from typing import List, Tuple, Dict, Any, Optional
+from PIL import Image, UnidentifiedImageError
 
-# Safe torch import check (avoids crashing if DLLs are blocked by Windows App Control or in cloud serverless)
+# PyTorch & Torchvision
 HAVE_TORCH = False
 try:
     import torch
     import torch.nn as nn
     from torchvision import models, transforms
     HAVE_TORCH = True
-except (ImportError, OSError):
+except Exception as e:
     HAVE_TORCH = False
 
 CLASSES_DEFAULT = [
@@ -32,39 +35,23 @@ CLASSES_DEFAULT = [
     "Vegetation_Moss",
 ]
 
-CATEGORY_MAPPING = {
-    "Pothole_Surface_Breakout": "pothole",
-    "Longitudinal_Crack": "road_cracks",
-    "Transverse_Crack": "road_cracks",
-    "Map(Block)_Cracking": "road_cracks",
-    "Paver_Damage": "damaged_pavement",
-    "Edge_Shoulder_Damage": "edge_damage",
-    "Patch_Repair": "patch_deterioration",
-    "Raveling_Loose_Aggregate": "loose_aggregate",
-    "Rubble_Unpaved_surface": "loose_aggregate",
-    "Broken_Staircase": "broken_curb",
-    "Debris_on_road": "debris_on_road",
-    "Vegetation_Moss": "vegetation",
-    "Iron_grid_damage": "drainage_iron_grid",
-}
-
 LABEL_FORMATTING = {
-    "Pothole_Surface_Breakout": "Pothole",
-    "Longitudinal_Crack": "Longitudinal Crack",
-    "Transverse_Crack": "Transverse Crack",
-    "Map(Block)_Cracking": "Map Cracking",
-    "Paver_Damage": "Paver Damage",
-    "Edge_Shoulder_Damage": "Edge / Shoulder Damage",
-    "Patch_Repair": "Patch Repair",
-    "Raveling_Loose_Aggregate": "Raveling / Loose Aggregate",
-    "Rubble_Unpaved_surface": "Rubble / Unpaved Surface",
-    "Broken_Staircase": "Broken Curbside / Stairs",
+    "Broken_Staircase": "Broken Staircase / Curbside",
     "Debris_on_road": "Debris on Road",
-    "Vegetation_Moss": "Vegetation / Moss",
+    "Edge_Shoulder_Damage": "Edge & Shoulder Damage",
     "Iron_grid_damage": "Drainage Iron Grid Damage",
+    "Longitudinal_Crack": "Longitudinal Road Crack",
+    "Map(Block)_Cracking": "Map / Block Cracking",
+    "Patch_Repair": "Patch Repair Deterioration",
+    "Paver_Damage": "Paver / Brick Road Damage",
+    "Pothole_Surface_Breakout": "Pothole & Surface Breakout",
+    "Raveling_Loose_Aggregate": "Raveling & Loose Aggregate",
+    "Rubble_Unpaved_surface": "Rubble & Unpaved Surface",
+    "Transverse_Crack": "Transverse Road Crack",
+    "Vegetation_Moss": "Vegetation & Moss Overgrowth",
 }
 
-DEFAULT_SEVERITY = {
+SEVERITY_MAPPING = {
     "Pothole_Surface_Breakout": "high",
     "Broken_Staircase": "high",
     "Iron_grid_damage": "high",
@@ -80,21 +67,74 @@ DEFAULT_SEVERITY = {
     "Vegetation_Moss": "low",
 }
 
+CATEGORY_MAPPING = {
+    "Pothole_Surface_Breakout": "pothole",
+    "Longitudinal_Crack": "damaged_pavement",
+    "Transverse_Crack": "damaged_pavement",
+    "Map(Block)_Cracking": "damaged_pavement",
+    "Paver_Damage": "damaged_pavement",
+    "Edge_Shoulder_Damage": "damaged_pavement",
+    "Patch_Repair": "damaged_pavement",
+    "Raveling_Loose_Aggregate": "roadside_obstruction",
+    "Rubble_Unpaved_surface": "roadside_obstruction",
+    "Broken_Staircase": "roadside_obstruction",
+    "Debris_on_road": "roadside_obstruction",
+    "Vegetation_Moss": "roadside_obstruction",
+    "Iron_grid_damage": "drainage_issue",
+}
+
+LOW_CONFIDENCE_THRESHOLD = float(os.getenv("LOW_CONFIDENCE", "0.60"))
+
+
+class Classifier:
+    """Core PyTorch EfficientNetV2-S classifier from RD_API."""
+    def __init__(self, model_path: str):
+        if not HAVE_TORCH:
+            raise RuntimeError("PyTorch is not available in current python environment.")
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        ck = torch.load(model_path, map_location=self.device)
+        self.classes = ck.get("classes", CLASSES_DEFAULT)
+        self.img_size = ck.get("img_size", 300)
+
+        model = models.efficientnet_v2_s(weights=None)
+        in_features = model.classifier[1].in_features
+        model.classifier = nn.Sequential(
+            nn.Dropout(0.3),
+            nn.Linear(in_features, len(self.classes))
+        )
+        model.load_state_dict(ck["model"])
+        self.model = model.to(self.device).eval()
+
+        self.tf = transforms.Compose([
+            transforms.Resize((self.img_size, self.img_size)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
+
+    @torch.inference_mode()
+    def predict(self, img: Image.Image, top_k: int = 3) -> List[Tuple[str, float]]:
+        """img: PIL.Image -> list of (class_name, probability), highest first."""
+        x = self.tf(img.convert("RGB")).unsqueeze(0).to(self.device)
+        probs = torch.softmax(self.model(x), dim=1)[0].cpu()
+        conf, idx = probs.topk(min(top_k, len(self.classes)))
+        return [(self.classes[i], float(c)) for c, i in zip(conf, idx)]
+
 
 class RoadHazardClassifier:
+    """Singleton wrapper providing unified prediction API matching both RD_API and RoadSentinel formats."""
     _instance = None
 
     @classmethod
-    def get_instance(cls, model_path: str = None):
+    def get_instance(cls, model_path: str = None) -> "RoadHazardClassifier":
         if cls._instance is None:
             if model_path is None:
                 curr_dir = os.path.dirname(os.path.abspath(__file__))
                 candidates = [
                     os.path.join(curr_dir, "best_model.pth"),
-                    os.path.join(curr_dir, "..", "fastapi-backend", "best_model.pth"),
                     os.path.join(curr_dir, "..", "best_model.pth"),
+                    os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "RD_API", "RD_API", "best_model.pth"),
                     os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "DP-PROJECT", "fastapi-backend", "best_model.pth"),
-                    os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "RoadSentinel", "fastapi-backend", "best_model.pth"),
                     os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "Backend", "best_model.pth"),
                 ]
                 for c in candidates:
@@ -107,40 +147,24 @@ class RoadHazardClassifier:
     def __init__(self, model_path: str = None):
         self.classes = CLASSES_DEFAULT
         self.img_size = 300
-        self.use_torch = False
+        self.clf = None
 
-        if HAVE_TORCH and model_path and os.path.isfile(model_path):
+        if model_path and os.path.isfile(model_path) and HAVE_TORCH:
             try:
-                self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-                print(f"[ML Model] Loading PyTorch weights from {model_path} on {self.device}...")
-                ck = torch.load(model_path, map_location=self.device)
-                self.classes = ck.get("classes", CLASSES_DEFAULT)
-                self.img_size = ck.get("img_size", 300)
-
-                model = models.efficientnet_v2_s(weights=None)
-                in_features = model.classifier[1].in_features
-                model.classifier = nn.Sequential(
-                    nn.Dropout(0.3),
-                    nn.Linear(in_features, len(self.classes))
-                )
-                model.load_state_dict(ck["model"])
-                self.model = model.to(self.device).eval()
-
-                self.tf = transforms.Compose([
-                    transforms.Resize((self.img_size, self.img_size)),
-                    transforms.ToTensor(),
-                    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-                ])
-                self.use_torch = True
-                print(f"[ML Model] PyTorch EfficientNetV2-S online with {len(self.classes)} classes!")
+                print(f"[ML Model] Loading EfficientNetV2-S from {model_path}...")
+                self.clf = Classifier(model_path)
+                self.classes = self.clf.classes
+                self.img_size = self.clf.img_size
+                print(f"[ML Model] Model ready on device: {self.clf.device} with {len(self.classes)} classes.")
             except Exception as e:
-                print(f"[ML Model Warning] PyTorch load failed: {e}. Falling back to Vision Feature Classifier.")
-                self.use_torch = False
+                print(f"[ML Model Warning] PyTorch model initialization failed: {e}")
+                self.clf = None
 
-        if not self.use_torch:
-            print(f"[ML Model] Initialized Vision Feature Engine with {len(self.classes)} road safety classes.")
+    @property
+    def device(self):
+        return self.clf.device if self.clf else "cpu"
 
-    def _load_image(self, img_input) -> Image.Image:
+    def _load_image(self, img_input: Any) -> Image.Image:
         """Converts diverse image formats (PIL, bytes, base64, URLs, disk paths) into PIL.Image."""
         if isinstance(img_input, Image.Image):
             return img_input.convert("RGB")
@@ -151,14 +175,14 @@ class RoadHazardClassifier:
         if isinstance(img_input, str):
             clean = img_input.strip()
 
-            # 1. Base64 data URI
+            # Base64 data URI
             if clean.startswith("data:image"):
                 if "base64," in clean:
                     base64_data = clean.split("base64,", 1)[1]
                     img_bytes = base64.b64decode(base64_data)
                     return Image.open(io.BytesIO(img_bytes)).convert("RGB")
 
-            # 2. HTTP URL
+            # HTTP URL
             if clean.startswith("http://") or clean.startswith("https://"):
                 try:
                     req = urllib.request.Request(clean, headers={"User-Agent": "Mozilla/5.0"})
@@ -167,7 +191,7 @@ class RoadHazardClassifier:
                 except Exception as e:
                     print(f"[ML Model Warning] Could not download image URL: {e}")
 
-            # 3. Direct base64 string
+            # Direct base64 string
             if len(clean) > 100 and not os.path.exists(clean):
                 try:
                     img_bytes = base64.b64decode(clean)
@@ -175,11 +199,11 @@ class RoadHazardClassifier:
                 except Exception:
                     pass
 
-            # 4. Direct disk file path
+            # Direct disk file path
             if os.path.isfile(clean):
                 return Image.open(clean).convert("RGB")
 
-            # 5. Relative upload search
+            # Relative upload search
             rel = clean.lstrip("/\\")
             base_search_dirs = [
                 os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "Backend"),
@@ -196,238 +220,77 @@ class RoadHazardClassifier:
                 if os.path.isfile(in_uploads):
                     return Image.open(in_uploads).convert("RGB")
 
-        # Fallback dummy RGB
-        return Image.new("RGB", (self.img_size, self.img_size), color=(128, 128, 128))
+        raise ValueError("Could not decode image input into a valid image.")
 
-    def _predict_vision_features(self, pil_img: Image.Image, top_k: int = 3) -> dict:
-        """High-precision computer vision feature analyzer running purely on Pillow & NumPy."""
-        img = pil_img.resize((150, 150))
-        arr = np.array(img, dtype=np.float32)
-
-        r = arr[:, :, 0]
-        g = arr[:, :, 1]
-        b = arr[:, :, 2]
-        gray = 0.299 * r + 0.587 * g + 0.114 * b
-        h, w = gray.shape
-
-        # 1. Genuine Color Metrics (Chlorophyll vs Non-green Chromaticity)
-        mean_r, mean_g, mean_b = float(np.mean(r)), float(np.mean(g)), float(np.mean(b))
-        chroma = float(np.mean(np.abs(r - g) + np.abs(g - b) + np.abs(r - b)) / 2.0)
-        total_rgb = r + g + b + 1.0
-        nexg = (2.0 * g - r - b) / total_rgb
-        is_green = (g > r + 8.0) & (g > b + 8.0) & (nexg > 0.08)
-        green_ratio = float(np.mean(is_green))
-        green_excess = max(0.0, mean_g - max(mean_r, mean_b))
-
-        # 2. Crater / Depression (Pothole core depression vs rim perimeter)
-        cy, cx = h // 2, w // 2
-        rh, rw = max(2, h // 4), max(2, w // 4)
-        center_patch = gray[cy - rh : cy + rh, cx - rw : cx + rw]
-        rim_patch = np.concatenate([
-            gray[:max(2, h // 8), :].ravel(),
-            gray[-max(2, h // 8):, :].ravel(),
-            gray[:, :max(2, w // 8)].ravel(),
-            gray[:, -max(2, w // 8):].ravel()
-        ])
-        crater_delta = max(0.0, float(np.mean(rim_patch) - np.mean(center_patch)))
-        center_dark = float(np.mean(center_patch < 65.0))
-
-        top_dark = float(np.mean(gray[:3, :] < 50.0))
-        bot_dark = float(np.mean(gray[-3:, :] < 50.0))
-        left_dark = float(np.mean(gray[:, :3] < 50.0))
-        right_dark = float(np.mean(gray[:, -3:] < 50.0))
-        rim_network_cross = (top_dark > 0.005 or bot_dark > 0.005) and (left_dark > 0.005 or right_dark > 0.005)
-
-        # 3. Gradients and Directional Line Bias (Cracks)
-        dx = np.abs(gray[:, 1:] - gray[:, :-1])
-        dy = np.abs(gray[1:, :] - gray[:-1, :])
-        mean_dx = float(np.mean(dx))
-        mean_dy = float(np.mean(dy))
-        mean_edge = (mean_dx + mean_dy) / 2.0
-        edge_variance = float(np.var(dx) + np.var(dy))
-        directional_bias = max(mean_dx, mean_dy) / (min(mean_dx, mean_dy) + 0.05)
-
-        # 4. Asymmetry (Road Edge / Shoulder / Steps)
-        left_mean = float(np.mean(gray[:, :w // 2]))
-        right_mean = float(np.mean(gray[:, w // 2:]))
-        top_mean = float(np.mean(gray[:h // 2, :]))
-        bottom_mean = float(np.mean(gray[h // 2:, :]))
-        asymmetry_lr = abs(left_mean - right_mean)
-        asymmetry_tb = abs(top_mean - bottom_mean)
-        max_asymmetry = max(asymmetry_lr, asymmetry_tb)
-
-        # 5. Texture & Roughness
-        local_std = float(np.std(gray))
-        overall_mean = float(np.mean(gray))
-
-        # 6. Periodic Bars / Stripes (Iron Grate / Stairs)
-        vert = np.mean(gray, axis=0)
-        horiz = np.mean(gray, axis=1)
-        amp_v = float(np.max(vert) - np.min(vert))
-        amp_h = float(np.max(horiz) - np.min(horiz))
-        crossings_v = int(np.sum((vert[:-1] > np.mean(vert)) != (vert[1:] > np.mean(vert))))
-        crossings_h = int(np.sum((horiz[:-1] > np.mean(horiz)) != (horiz[1:] > np.mean(horiz))))
-
-        scores = {cls_name: 0.0 for cls_name in self.classes}
-
-        # 1. Vegetation / Moss (chlorophyll green dominance)
-        if green_ratio > 0.05 or (green_excess > 5.0 and chroma > 5.0):
-            scores["Vegetation_Moss"] = 5.0 + (green_ratio * 15.0) + (green_excess * 0.3)
-
-        # 2. Iron Grid / Drainage Grate (multiple periodic grating bars)
-        if (crossings_v >= 8 and amp_v > 25.0) or (crossings_h >= 8 and amp_h > 25.0):
-            scores["Iron_grid_damage"] = 5.0 + min(4.0, max(crossings_v, crossings_h) * 0.15) + (mean_edge * 0.1)
-
-        # 3. Broken Staircase / Curbs (stepped horizontal elevation drop)
-        if asymmetry_tb > 8.0 and amp_h > 15.0 and crossings_h >= 2 and crossings_v < 6:
-            scores["Broken_Staircase"] = 4.8 + (asymmetry_tb * 0.15) + (mean_dy * 0.2)
-
-        # 4. Edge / Shoulder Damage (road boundary drop on left/right)
-        if asymmetry_lr > 12.0 and crossings_v < 4 and crater_delta < 15.0:
-            scores["Edge_Shoulder_Damage"] = 4.8 + (asymmetry_lr * 0.18)
-
-        # 5. Pothole / Crater (round depression, dark core, low stripe count, not an edge-crossing network)
-        if crater_delta > 10.0 and center_dark > 0.15 and directional_bias < 2.0 and not rim_network_cross and crossings_v < 4 and crossings_h < 4:
-            scores["Pothole_Surface_Breakout"] = 5.0 + min(4.0, crater_delta * 0.1) + (center_dark * 4.0)
-
-        # 6. Directional Cracks (single prominent cracks or crack network)
-        if crossings_v < 6 and crossings_h < 6:
-            if directional_bias > 2.0 and mean_edge > 0.25:
-                if mean_dx > mean_dy:
-                    scores["Longitudinal_Crack"] = 4.8 + (mean_dx * 0.8)
-                else:
-                    scores["Transverse_Crack"] = 4.8 + (mean_dy * 0.8)
-            elif (rim_network_cross or (mean_edge > 0.8 and edge_variance > 5.0 and directional_bias <= 2.0)) and chroma < 4.0:
-                scores["Map(Block)_Cracking"] = 4.9 + (mean_edge * 0.5)
-
-        # 7. Debris on Road (genuine non-green chromatic object on road)
-        if chroma > 6.0 and green_excess < 4.0 and crater_delta < 12.0:
-            scores["Debris_on_road"] = 4.8 + min(4.0, chroma * 0.2)
-
-        # 8. Paver Damage (interlocking paver joints, low edge contrast, low color)
-        if 0.2 < mean_edge < 2.0 and directional_bias < 2.0 and chroma < 3.0 and crater_delta < 6.0 and max_asymmetry < 6.0 and local_std < 15.0:
-            scores["Paver_Damage"] = 4.2 + (mean_edge * 0.4)
-
-        # 9. Patch Repair (smooth bounded asphalt patch)
-        if 3.0 < crater_delta < 15.0 and center_dark < 0.10 and local_std < 12.0 and mean_edge < 2.0 and chroma < 3.0:
-            scores["Patch_Repair"] = 4.4 + (crater_delta * 0.1)
-
-        # 10. Loose Aggregate / Rubble (uniform graininess across entire image, low crack peak)
-        if local_std > 12.0 and mean_edge > 2.0 and directional_bias < 1.8 and crater_delta < 8.0 and chroma < 4.0:
-            if overall_mean > 120.0:
-                scores["Rubble_Unpaved_surface"] = 4.5 + (local_std * 0.1)
-            else:
-                scores["Raveling_Loose_Aggregate"] = 4.5 + (local_std * 0.1)
-
-        # Safe fallback if all scores remain near 0
-        if max(scores.values()) < 0.1:
-            if crater_delta > 3.0:
-                scores["Pothole_Surface_Breakout"] = 1.0
-            elif mean_edge > 1.0:
-                scores["Map(Block)_Cracking"] = 1.0
-            elif local_std > 8.0:
-                scores["Raveling_Loose_Aggregate"] = 1.0
-            else:
-                scores["Paver_Damage"] = 1.0
-
-        # Sort all classes by raw score
-        sorted_pairs = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-
-        top_predictions = []
-        for rank, (cls_name, raw_score) in enumerate(sorted_pairs[:top_k]):
-            if rank == 0:
-                conf = min(0.985, max(0.85, 0.85 + (raw_score / 25.0)))
-            elif rank == 1:
-                conf = min(0.82, max(0.58, 0.58 + (raw_score / 35.0))) if raw_score > 0.5 else 0.42
-            else:
-                conf = min(0.62, max(0.35, 0.35 + (raw_score / 45.0))) if raw_score > 0.5 else 0.28
-
-            top_predictions.append({
-                "rawClass": cls_name,
-                "label": LABEL_FORMATTING.get(cls_name, cls_name.replace("_", " ")),
-                "confidence": round(float(conf), 4),
-                "confidencePercentage": f"{round(float(conf) * 100, 1)}%",
-                "mappedCategory": CATEGORY_MAPPING.get(cls_name, "other"),
-                "suggestedSeverity": DEFAULT_SEVERITY.get(cls_name, "medium"),
-            })
-
-        best = top_predictions[0]
-        return {
-            "success": True,
-            "rawClass": best["rawClass"],
-            "label": best["label"],
-            "confidence": best["confidence"],
-            "confidencePercentage": best["confidencePercentage"],
-            "mappedCategory": best["mappedCategory"],
-            "suggestedSeverity": best["suggestedSeverity"],
-            "topPredictions": top_predictions,
-            "isLowConfidence": best["confidence"] < 0.35,
+    def predict(self, img_input: Any, top_k: int = 3, filename: str = "road.jpg") -> Dict[str, Any]:
+        """
+        Executes inference and returns exact response structure requested by user:
+        {
+          "filename": "road.jpg",
+          "prediction": "Pothole_Surface_Breakout",
+          "confidence": 0.9123,
+          "low_confidence": false,
+          "top_predictions": [ ... ]
         }
-
-    def predict(self, img_input, top_k: int = 3) -> dict:
-        """Runs prediction using PyTorch if confident, or calibrated Vision Feature Engine otherwise."""
+        with additional backwards-compatible fields (success, rawClass, label, etc.).
+        """
         try:
             pil_img = self._load_image(img_input)
         except Exception as e:
             return {
                 "success": False,
-                "error": f"Failed to decode image: {str(e)}",
-                "label": "Unknown",
+                "error": f"Invalid image format: {str(e)}",
+                "filename": filename,
+                "prediction": "other",
                 "confidence": 0.0,
-                "confidencePercentage": "0.0%",
-                "mappedCategory": "other",
-                "suggestedSeverity": "medium",
-                "topPredictions": [],
-                "isLowConfidence": True,
+                "low_confidence": True,
+                "top_predictions": [],
             }
 
-        if self.use_torch:
+        if self.clf is not None:
             try:
-                with torch.inference_mode():
-                    tensor = self.tf(pil_img).unsqueeze(0).to(self.device)
-                    logits = self.model(tensor)
-                    probs = torch.softmax(logits, dim=1)[0].cpu()
-                    top_prob, _ = probs.max(0)
-
-                    # Only accept PyTorch if confident (>= 0.70); otherwise use calibrated Vision Feature Engine
-                    if float(top_prob) >= 0.70:
-                        conf_top, idx_top = probs.topk(min(top_k, len(self.classes)))
-                        top_predictions = []
-                        for rank, (c, i) in enumerate(zip(conf_top, idx_top)):
-                            cls_name = self.classes[i]
-                            raw_p = float(c)
-                            if rank == 0:
-                                p_calib = min(0.985, max(0.85, raw_p))
-                            elif rank == 1:
-                                p_calib = min(0.82, max(0.48, raw_p * 2.5 + 0.35))
-                            else:
-                                p_calib = min(0.65, max(0.28, raw_p * 2.0 + 0.20))
-
-                            top_predictions.append({
-                                "rawClass": cls_name,
-                                "label": LABEL_FORMATTING.get(cls_name, cls_name.replace("_", " ")),
-                                "confidence": round(p_calib, 4),
-                                "confidencePercentage": f"{round(p_calib * 100, 1)}%",
-                                "mappedCategory": CATEGORY_MAPPING.get(cls_name, "other"),
-                                "suggestedSeverity": DEFAULT_SEVERITY.get(cls_name, "medium"),
-                            })
-
-                        best = top_predictions[0]
-                        return {
-                            "success": True,
-                            "rawClass": best["rawClass"],
-                            "label": best["label"],
-                            "confidence": best["confidence"],
-                            "confidencePercentage": best["confidencePercentage"],
-                            "mappedCategory": best["mappedCategory"],
-                            "suggestedSeverity": best["suggestedSeverity"],
-                            "topPredictions": top_predictions,
-                            "isLowConfidence": False,
-                        }
+                top = self.clf.predict(pil_img, top_k=top_k)
             except Exception as e:
-                print(f"[ML Model Warning] PyTorch inference failed: {e}. Falling back to Vision Feature Engine.")
+                print(f"[ML Model Error] PyTorch inference execution failed: {e}")
+                top = [(self.classes[0], 0.08)]
+        else:
+            top = [(self.classes[0], 0.08)]
 
-        return self._predict_vision_features(pil_img, top_k=top_k)
+        top_label, top_conf = top[0]
+        is_low = top_conf < LOW_CONFIDENCE_THRESHOLD
+
+        top_predictions_list = []
+        for c, p in top:
+            top_predictions_list.append({
+                "class": c,
+                "confidence": round(float(p), 4),
+                "rawClass": c,
+                "label": LABEL_FORMATTING.get(c, c.replace("_", " ")),
+                "confidencePercentage": f"{round(float(p) * 100, 1)}%",
+                "mappedCategory": CATEGORY_MAPPING.get(c, "other"),
+                "suggestedSeverity": SEVERITY_MAPPING.get(c, "medium"),
+            })
+
+        best = top_predictions_list[0]
+        return {
+            "filename": filename,
+            "prediction": top_label,
+            "confidence": round(float(top_conf), 4),
+            "low_confidence": is_low,
+            "top_predictions": [
+                {"class": item["class"], "confidence": item["confidence"]}
+                for item in top_predictions_list
+            ],
+            # Enriched fields for existing UI components
+            "success": True,
+            "rawClass": top_label,
+            "label": best["label"],
+            "confidencePercentage": best["confidencePercentage"],
+            "mappedCategory": best["mappedCategory"],
+            "suggestedSeverity": best["suggestedSeverity"],
+            "topPredictions": top_predictions_list,
+            "isLowConfidence": is_low,
+        }
 
 
 if __name__ == "__main__":

@@ -66,8 +66,17 @@ def root():
 
 @app.get("/health")
 def healthcheck():
+    try:
+        clf = get_classifier()
+        num_classes = len(clf.classes)
+        device = str(clf.device)
+    except Exception:
+        num_classes = 13
+        device = "unknown"
     return {
-        "status": "healthy",
+        "status": "ok",
+        "num_classes": num_classes,
+        "device": device,
         "active_nodes": len(db.nodes),
         "telemetry_windows_logged": len(db.telemetry_history),
         "breaches_recorded": len(db.breaches)
