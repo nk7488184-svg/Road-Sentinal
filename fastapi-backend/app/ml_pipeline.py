@@ -62,14 +62,59 @@ def save_base64_image(base64_str: str, device_id: str, breach_id: str) -> Option
         print(f"[Evidence Storage Error] {e}")
         return None
 
+_anpr_pipeline = None
+
+def get_anpr():
+    global _anpr_pipeline
+    if _anpr_pipeline is None:
+        try:
+            import sys
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if base_dir not in sys.path:
+                sys.path.insert(0, base_dir)
+            from pipeline import ANPRPipeline
+            _anpr_pipeline = ANPRPipeline(use_ocr=True)
+            print("[ML Pipeline] YOLOv8 Vehicle & Plate ANPR Pipeline initialized successfully.")
+        except Exception as e:
+            print(f"[ML Pipeline ANPR Notice] {e}")
+            _anpr_pipeline = False
+    return _anpr_pipeline if _anpr_pipeline is not False else None
+
+
 def run_ml_inference(payload: SpeedBreachPayload, image_path: Optional[str]) -> Tuple[str, float, str, float]:
     """
-    Simulates / Executes YOLOv8 Vehicle Classification + ALPR (License Plate OCR) pipeline.
+    Executes YOLOv8 Vehicle Classification + ALPR (License Plate OCR) pipeline using car_det_API models.
+    Falls back gracefully if image or models are unavailable.
     Returns: (vehicle_type, pce_weight, license_plate, ocr_confidence)
     """
-    import random
+    anpr = get_anpr()
+    if anpr and image_path:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        rel = image_path.lstrip("/\\")
+        disk_path = os.path.join(base_dir, rel)
+        if os.path.exists(disk_path):
+            try:
+                from PIL import Image
+                img = Image.open(disk_path).convert("RGB")
+                res = anpr.analyze(img)
+                vehicles = res.get("vehicles", [])
+                if vehicles:
+                    top = vehicles[0]
+                    v_type = top.get("class", "car").capitalize()
+                    pce = top.get("pce", 1.0)
+                    plate_obj = top.get("plate")
+                    if plate_obj and plate_obj.get("text"):
+                        return v_type, pce, plate_obj["text"], float(plate_obj.get("ocr_confidence", 0.90))
+                    # Check unassigned plates
+                    unassigned = res.get("unassigned_plates", [])
+                    if unassigned and unassigned[0].get("text"):
+                        return v_type, pce, unassigned[0]["text"], float(unassigned[0].get("ocr_confidence", 0.85))
+                    return v_type, pce, "PLATE_UNREADABLE", 0.55
+            except Exception as e:
+                print(f"[ANPR Inference Warning] {e}")
 
-    # Deterministic or randomized realistic classification based on speed profile
+    # Deterministic or realistic classification fallback based on speed profile
+    import random
     if payload.speed_kmh > 65.0:
         vehicle_type = random.choice(["Car", "SUV", "Motorcycle"])
     elif payload.speed_kmh < 25.0:
@@ -78,11 +123,8 @@ def run_ml_inference(payload: SpeedBreachPayload, image_path: Optional[str]) -> 
         vehicle_type = random.choice(["Car", "SUV", "Motorcycle", "Van"])
 
     pce = PCE_WEIGHTS.get(vehicle_type, 1.0)
-
-    # Realistic OCR detection: High confidence for most, occasional blurry plate for active learning
     confidence = round(random.uniform(0.62, 0.98), 2)
     plate = random.choice(SAMPLE_PLATES)
-
     return vehicle_type, pce, plate, confidence
 
 def process_speed_breach(payload: SpeedBreachPayload) -> Tuple[ProcessedBreachRecord, Optional[ActiveLearningSample]]:

@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from app.routes.telemetry import router as telemetry_router
 from app.routes.predict import router as predict_router, get_classifier
+from app.routes.anpr import router as anpr_router
 from app.websocket_manager import manager
 from app.database import db
 
@@ -41,6 +42,7 @@ app.mount("/evidence", StaticFiles(directory=evidence_dir), name="evidence")
 # Register Routers
 app.include_router(telemetry_router)
 app.include_router(predict_router)
+app.include_router(anpr_router)
 
 @app.get("/")
 def root():
