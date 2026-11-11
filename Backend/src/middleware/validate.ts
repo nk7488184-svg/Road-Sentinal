@@ -20,11 +20,34 @@ export const validate = (validations: ValidationChain[]) => {
 export const reportValidation = [
   body('title').isString().isLength({ min: 3 }).withMessage('Title is required and must be at least 3 characters'),
   body('description').notEmpty().withMessage('Description is required'),
-  body('category').isIn(['pothole', 'damaged_pavement', 'faded_markings', 'roadside_obstruction', 'drainage_issue', 'poor_lighting', 'driver_behavior', 'other']).withMessage('Invalid category'),
+  body('category').isIn([
+    'Broken_Staircase',
+    'Debris_on_road',
+    'Edge_Shoulder_Damage',
+    'Iron_grid_damage',
+    'Longitudinal_Crack',
+    'Map(Block)_Cracking',
+    'Patch_Repair',
+    'Paver_Damage',
+    'Pothole_Surface_Breakout',
+    'Raveling_Loose_Aggregate',
+    'Rubble_Unpaved_surface',
+    'Transverse_Crack',
+    'Vegetation_Moss',
+    // Legacy categories for backward compatibility
+    'pothole',
+    'damaged_pavement',
+    'faded_markings',
+    'roadside_obstruction',
+    'drainage_issue',
+    'poor_lighting',
+    'driver_behavior',
+    'other'
+  ]).withMessage('Invalid category'),
   body('severity').isIn(['low', 'medium', 'high', 'critical']).withMessage('Invalid severity'),
   body('location.lat').isNumeric().withMessage('Location latitude is required and must be a number'),
   body('location.lng').isNumeric().withMessage('Location longitude is required and must be a number'),
-  body('location.address').notEmpty().withMessage('Location address is required')
+  body('location.address').optional().isString()
 ];
 
 export const authValidation = {
