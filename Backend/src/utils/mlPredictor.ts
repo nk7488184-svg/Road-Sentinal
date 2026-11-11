@@ -48,35 +48,35 @@ const LABEL_FORMATTING: Record<string, string> = {
 };
 
 const SEVERITY_MAPPING: Record<string, string> = {
-  "Pothole_Surface_Breakout": "high",
+  "Pothole_Surface_Breakout": "critical",
   "Broken_Staircase": "high",
   "Iron_grid_damage": "high",
-  "Map(Block)_Cracking": "medium",
+  "Map(Block)_Cracking": "high",
   "Longitudinal_Crack": "medium",
   "Transverse_Crack": "medium",
   "Paver_Damage": "medium",
   "Edge_Shoulder_Damage": "medium",
   "Debris_on_road": "medium",
+  "Rubble_Unpaved_surface": "medium",
   "Patch_Repair": "low",
   "Raveling_Loose_Aggregate": "low",
-  "Rubble_Unpaved_surface": "low",
   "Vegetation_Moss": "low",
 };
 
 const CATEGORY_MAPPING: Record<string, string> = {
-  "Pothole_Surface_Breakout": "pothole",
-  "Longitudinal_Crack": "damaged_pavement",
-  "Transverse_Crack": "damaged_pavement",
-  "Map(Block)_Cracking": "damaged_pavement",
-  "Paver_Damage": "damaged_pavement",
-  "Edge_Shoulder_Damage": "damaged_pavement",
-  "Patch_Repair": "damaged_pavement",
-  "Raveling_Loose_Aggregate": "roadside_obstruction",
-  "Rubble_Unpaved_surface": "roadside_obstruction",
-  "Broken_Staircase": "roadside_obstruction",
-  "Debris_on_road": "roadside_obstruction",
-  "Vegetation_Moss": "roadside_obstruction",
-  "Iron_grid_damage": "drainage_issue",
+  "Broken_Staircase": "Broken_Staircase",
+  "Debris_on_road": "Debris_on_road",
+  "Edge_Shoulder_Damage": "Edge_Shoulder_Damage",
+  "Iron_grid_damage": "Iron_grid_damage",
+  "Longitudinal_Crack": "Longitudinal_Crack",
+  "Map(Block)_Cracking": "Map(Block)_Cracking",
+  "Patch_Repair": "Patch_Repair",
+  "Paver_Damage": "Paver_Damage",
+  "Pothole_Surface_Breakout": "Pothole_Surface_Breakout",
+  "Raveling_Loose_Aggregate": "Raveling_Loose_Aggregate",
+  "Rubble_Unpaved_surface": "Rubble_Unpaved_surface",
+  "Transverse_Crack": "Transverse_Crack",
+  "Vegetation_Moss": "Vegetation_Moss",
 };
 
 function formatPrediction(data: any): MLPredictionResult {

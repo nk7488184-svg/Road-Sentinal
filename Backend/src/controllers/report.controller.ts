@@ -83,7 +83,7 @@ export const createReport = async (req: Request, res: Response) => {
         }
 
         const reportedAt = new Date();
-        const finalCategory = category || mlPrediction?.mappedCategory || 'other';
+        const finalCategory = category || mlPrediction?.rawClass || mlPrediction?.prediction || mlPrediction?.mappedCategory || 'Pothole_Surface_Breakout';
         const finalSeverity = severity || mlPrediction?.suggestedSeverity || 'medium';
         const priorityScore = calculatePriorityScore(finalSeverity as Severity, finalCategory as HazardCategory, reportedAt);
         const reportedBy = (req as any).user ? (req as any).user : { name: 'Anonymous Campus Reporter' };

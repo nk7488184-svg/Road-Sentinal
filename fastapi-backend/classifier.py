@@ -1,22 +1,32 @@
-"""Loads best_model.pth (EfficientNetV2-S) and classifies road hazards.
-Directly incorporates RD_API PyTorch architecture with enriched metadata.
+"""Loads best_model.onnx / best_model.pth (EfficientNetV2-S) and classifies road hazards.
+Uses ONNX Runtime as the primary high-performance engine (with PyTorch as fallback),
+providing full 13-class detection, exact RD_API response schema, and dashboard metadata.
 """
 import os
 import io
 import json
 import base64
 import urllib.request
+import numpy as np
 from typing import List, Tuple, Dict, Any, Optional
 from PIL import Image, UnidentifiedImageError
 
-# PyTorch & Torchvision
+# ONNX Runtime (Primary, fast, Microsoft-signed, SAC-compliant)
+HAVE_ORT = False
+try:
+    import onnxruntime as ort
+    HAVE_ORT = True
+except Exception:
+    HAVE_ORT = False
+
+# PyTorch & Torchvision (Fallback)
 HAVE_TORCH = False
 try:
     import torch
     import torch.nn as nn
     from torchvision import models, transforms
     HAVE_TORCH = True
-except Exception as e:
+except Exception:
     HAVE_TORCH = False
 
 CLASSES_DEFAULT = [
@@ -86,39 +96,76 @@ CATEGORY_MAPPING = {
 LOW_CONFIDENCE_THRESHOLD = float(os.getenv("LOW_CONFIDENCE", "0.60"))
 
 
-class Classifier:
-    """Core PyTorch EfficientNetV2-S classifier from RD_API."""
-    def __init__(self, model_path: str):
-        if not HAVE_TORCH:
-            raise RuntimeError("PyTorch is not available in current python environment.")
+class OrtClassifier:
+    """High-performance ONNX Runtime classifier for EfficientNetV2-S."""
+    def __init__(self, onnx_path: str):
+        self.device = "cpu"
+        self.classes = CLASSES_DEFAULT
+        self.img_size = 300
 
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        ck = torch.load(model_path, map_location=self.device)
-        self.classes = ck.get("classes", CLASSES_DEFAULT)
-        self.img_size = ck.get("img_size", 300)
+        # Configure session options
+        sess_options = ort.SessionOptions()
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        
+        self.session = ort.InferenceSession(onnx_path, sess_options, providers=["CPUExecutionProvider"])
+        self.input_name = self.session.get_inputs()[0].name
+        self.output_name = self.session.get_outputs()[0].name
 
-        model = models.efficientnet_v2_s(weights=None)
-        in_features = model.classifier[1].in_features
-        model.classifier = nn.Sequential(
-            nn.Dropout(0.3),
-            nn.Linear(in_features, len(self.classes))
-        )
-        model.load_state_dict(ck["model"])
-        self.model = model.to(self.device).eval()
+    def preprocess(self, img: Image.Image) -> np.ndarray:
+        # Resize to 300x300
+        resized = img.convert("RGB").resize((self.img_size, self.img_size), Image.Resampling.BILINEAR)
+        arr = np.array(resized, dtype=np.float32) / 255.0
+        # ImageNet normalization
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        arr = (arr - mean) / std
+        arr = np.transpose(arr, (2, 0, 1))  # (3, H, W)
+        return np.expand_dims(arr, 0)       # (1, 3, H, W)
 
-        self.tf = transforms.Compose([
-            transforms.Resize((self.img_size, self.img_size)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ])
-
-    @torch.inference_mode()
     def predict(self, img: Image.Image, top_k: int = 3) -> List[Tuple[str, float]]:
-        """img: PIL.Image -> list of (class_name, probability), highest first."""
-        x = self.tf(img.convert("RGB")).unsqueeze(0).to(self.device)
-        probs = torch.softmax(self.model(x), dim=1)[0].cpu()
-        conf, idx = probs.topk(min(top_k, len(self.classes)))
-        return [(self.classes[i], float(c)) for c, i in zip(conf, idx)]
+        inp = self.preprocess(img)
+        logits = self.session.run([self.output_name], {self.input_name: inp})[0][0]
+        # Softmax
+        exp_logits = np.exp(logits - np.max(logits))
+        probs = exp_logits / np.sum(exp_logits)
+        top_indices = np.argsort(probs)[::-1][:min(top_k, len(self.classes))]
+        return [(self.classes[i], float(probs[i])) for i in top_indices]
+
+
+if HAVE_TORCH:
+    class PyTorchClassifier:
+        """Core PyTorch EfficientNetV2-S classifier from RD_API."""
+        def __init__(self, model_path: str):
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            ck = torch.load(model_path, map_location=self.device)
+            self.classes = ck.get("classes", CLASSES_DEFAULT)
+            self.img_size = ck.get("img_size", 300)
+
+            model = models.efficientnet_v2_s(weights=None)
+            in_features = model.classifier[1].in_features
+            model.classifier = nn.Sequential(
+                nn.Dropout(0.3),
+                nn.Linear(in_features, len(self.classes))
+            )
+            model.load_state_dict(ck["model"])
+            self.model = model.to(self.device).eval()
+
+            self.tf = transforms.Compose([
+                transforms.Resize((self.img_size, self.img_size)),
+                transforms.ToTensor(),
+                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+            ])
+
+        @torch.inference_mode()
+        def predict(self, img: Image.Image, top_k: int = 3) -> List[Tuple[str, float]]:
+            x = self.tf(img.convert("RGB")).unsqueeze(0).to(self.device)
+            probs = torch.softmax(self.model(x), dim=1)[0].cpu()
+            conf, idx = probs.topk(min(top_k, len(self.classes)))
+            return [(self.classes[i], float(c)) for c, i in zip(conf, idx)]
+else:
+    class PyTorchClassifier:
+        def __init__(self, model_path: str):
+            raise RuntimeError("PyTorch is not available in current python environment.")
 
 
 class RoadHazardClassifier:
@@ -128,19 +175,6 @@ class RoadHazardClassifier:
     @classmethod
     def get_instance(cls, model_path: str = None) -> "RoadHazardClassifier":
         if cls._instance is None:
-            if model_path is None:
-                curr_dir = os.path.dirname(os.path.abspath(__file__))
-                candidates = [
-                    os.path.join(curr_dir, "best_model.pth"),
-                    os.path.join(curr_dir, "..", "best_model.pth"),
-                    os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "RD_API", "RD_API", "best_model.pth"),
-                    os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "DP-PROJECT", "fastapi-backend", "best_model.pth"),
-                    os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "Backend", "best_model.pth"),
-                ]
-                for c in candidates:
-                    if os.path.isfile(c):
-                        model_path = c
-                        break
             cls._instance = RoadHazardClassifier(model_path)
         return cls._instance
 
@@ -148,21 +182,63 @@ class RoadHazardClassifier:
         self.classes = CLASSES_DEFAULT
         self.img_size = 300
         self.clf = None
+        self.engine_name = "none"
 
-        if model_path and os.path.isfile(model_path) and HAVE_TORCH:
-            try:
-                print(f"[ML Model] Loading EfficientNetV2-S from {model_path}...")
-                self.clf = Classifier(model_path)
-                self.classes = self.clf.classes
-                self.img_size = self.clf.img_size
-                print(f"[ML Model] Model ready on device: {self.clf.device} with {len(self.classes)} classes.")
-            except Exception as e:
-                print(f"[ML Model Warning] PyTorch model initialization failed: {e}")
-                self.clf = None
+        curr_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        # 1. First priority: ONNX model (faster, robust, no SAC DLL issues)
+        onnx_candidates = [
+            os.path.join(curr_dir, "best_model.onnx"),
+            os.path.join(curr_dir, "..", "best_model.onnx"),
+            os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "DP-PROJECT", "fastapi-backend", "best_model.onnx"),
+            os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "RD_API", "RD_API", "best_model.onnx"),
+            os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "Backend", "best_model.onnx"),
+            os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "RoadSentinel", "fastapi-backend", "best_model.onnx"),
+        ]
+        
+        if HAVE_ORT:
+            for p in onnx_candidates:
+                if os.path.isfile(p):
+                    try:
+                        print(f"[ML Model] Loading ONNX model from {p}...")
+                        self.clf = OrtClassifier(p)
+                        self.classes = self.clf.classes
+                        self.img_size = self.clf.img_size
+                        self.engine_name = "onnxruntime"
+                        print(f"[ML Model] ONNX Runtime engine ready with {len(self.classes)} classes.")
+                        break
+                    except Exception as e:
+                        print(f"[ML Model Warning] ONNX load failed for {p}: {e}")
+
+        # 2. Second priority: PyTorch model
+        if self.clf is None and HAVE_TORCH:
+            pth_candidates = [
+                model_path,
+                os.path.join(curr_dir, "best_model.pth"),
+                os.path.join(curr_dir, "..", "best_model.pth"),
+                os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "RD_API", "RD_API", "best_model.pth"),
+                os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "DP-PROJECT", "fastapi-backend", "best_model.pth"),
+                os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "Backend", "best_model.pth"),
+            ]
+            for p in pth_candidates:
+                if p and os.path.isfile(p):
+                    try:
+                        print(f"[ML Model] Loading PyTorch model from {p}...")
+                        self.clf = PyTorchClassifier(p)
+                        self.classes = self.clf.classes
+                        self.img_size = self.clf.img_size
+                        self.engine_name = "pytorch"
+                        print(f"[ML Model] PyTorch engine ready with {len(self.classes)} classes.")
+                        break
+                    except Exception as e:
+                        print(f"[ML Model Warning] PyTorch load failed for {p}: {e}")
+
+        if self.clf is None:
+            print("[ML Model Error] Could not initialize any ML inference engine!")
 
     @property
     def device(self):
-        return self.clf.device if self.clf else "cpu"
+        return getattr(self.clf, "device", "cpu") if self.clf else "cpu"
 
     def _load_image(self, img_input: Any) -> Image.Image:
         """Converts diverse image formats (PIL, bytes, base64, URLs, disk paths) into PIL.Image."""
@@ -251,7 +327,7 @@ class RoadHazardClassifier:
             try:
                 top = self.clf.predict(pil_img, top_k=top_k)
             except Exception as e:
-                print(f"[ML Model Error] PyTorch inference execution failed: {e}")
+                print(f"[ML Model Error] Inference execution failed: {e}")
                 top = [(self.classes[0], 0.08)]
         else:
             top = [(self.classes[0], 0.08)]
@@ -291,6 +367,10 @@ class RoadHazardClassifier:
             "topPredictions": top_predictions_list,
             "isLowConfidence": is_low,
         }
+
+
+# Direct Classifier class alias for RD_API test scripts compatibility
+Classifier = OrtClassifier if HAVE_ORT else PyTorchClassifier
 
 
 if __name__ == "__main__":

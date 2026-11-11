@@ -1,6 +1,20 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
-export type HazardCategory = 'pothole' | 'damaged_pavement' | 'faded_markings' | 'roadside_obstruction' | 'drainage_issue' | 'poor_lighting' | 'driver_behavior' | 'other';
+export type HazardCategory =
+  | 'Broken_Staircase'
+  | 'Debris_on_road'
+  | 'Edge_Shoulder_Damage'
+  | 'Iron_grid_damage'
+  | 'Longitudinal_Crack'
+  | 'Map(Block)_Cracking'
+  | 'Patch_Repair'
+  | 'Paver_Damage'
+  | 'Pothole_Surface_Breakout'
+  | 'Raveling_Loose_Aggregate'
+  | 'Rubble_Unpaved_surface'
+  | 'Transverse_Crack'
+  | 'Vegetation_Moss'
+  | string;
 export type Severity = 'low' | 'medium' | 'high' | 'critical';
 export type Status = 'submitted' | 'under_review' | 'in_progress' | 'resolved';
 
@@ -48,7 +62,6 @@ const hazardReportSchema = new Schema<IHazardReport>(
     },
     category: {
       type: String,
-      enum: ['pothole', 'damaged_pavement', 'faded_markings', 'roadside_obstruction', 'drainage_issue', 'poor_lighting', 'driver_behavior', 'other'],
       required: [true, 'Please add a category'],
     },
     severity: {

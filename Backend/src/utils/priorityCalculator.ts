@@ -1,20 +1,18 @@
 export type HazardCategory =
-  | "pothole"
-  | "road_cracks"
-  | "damaged_pavement"
-  | "edge_damage"
-  | "patch_deterioration"
-  | "loose_aggregate"
-  | "debris_on_road"
-  | "vegetation"
-  | "drainage_iron_grid"
-  | "broken_curb"
-  | "faded_markings"
-  | "roadside_obstruction"
-  | "drainage_issue"
-  | "poor_lighting"
-  | "driver_behavior"
-  | "other";
+  | "Broken_Staircase"
+  | "Debris_on_road"
+  | "Edge_Shoulder_Damage"
+  | "Iron_grid_damage"
+  | "Longitudinal_Crack"
+  | "Map(Block)_Cracking"
+  | "Patch_Repair"
+  | "Paver_Damage"
+  | "Pothole_Surface_Breakout"
+  | "Raveling_Loose_Aggregate"
+  | "Rubble_Unpaved_surface"
+  | "Transverse_Crack"
+  | "Vegetation_Moss"
+  | string;
 
 export type Severity = "low" | "medium" | "high" | "critical";
 
@@ -34,29 +32,39 @@ export function calculatePriorityScore(severity: Severity, category: HazardCateg
 
     // Category weight
     switch (category) {
+        case "Pothole_Surface_Breakout":
         case "pothole":
+        case "Broken_Staircase":
+        case "Iron_grid_damage":
         case "drainage_issue":
         case "drainage_iron_grid":
         case "broken_curb":
             score += 15; break;
+        case "Map(Block)_Cracking":
+        case "Longitudinal_Crack":
+        case "Transverse_Crack":
+        case "Paver_Damage":
+        case "Edge_Shoulder_Damage":
         case "damaged_pavement":
         case "road_cracks":
         case "edge_damage":
         case "poor_lighting":
             score += 12; break;
+        case "Debris_on_road":
         case "debris_on_road":
+        case "Rubble_Unpaved_surface":
+        case "Patch_Repair":
+        case "Raveling_Loose_Aggregate":
         case "roadside_obstruction":
         case "patch_deterioration":
         case "loose_aggregate":
             score += 10; break;
+        case "Vegetation_Moss":
         case "vegetation":
         case "faded_markings":
             score += 8; break;
-        case "driver_behavior":
-            score += 5; break;
-        case "other":
         default:
-            score += 3; break;
+            score += 5; break;
     }
 
     // Age weight (capped at 30 days = 30 points)
